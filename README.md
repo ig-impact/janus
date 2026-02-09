@@ -1,5 +1,13 @@
 # Janus (Demo Monitoring Plan)
 
+## How to run locally
+
+Add necessary secrets to `.env` (`.env.template` available)
+
+```sh
+uv run streamlit main.py
+```
+
 This repository captures a minimal monitoring plan for the data pipeline spanning:
 - `impact-initiatives/klt` (dlt pipeline for KoboToolbox)
 - `impact-initiatives/matryoshka` (dbt project)
