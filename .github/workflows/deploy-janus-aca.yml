@@ -1,0 +1,83 @@
+name: Deploy Janus (Azure Container Apps)
+
+run-name: Deploy Janus to Azure Container Apps
+
+on:
+  workflow_run:
+    workflows: ["Docker Prod (ACR)"]
+    types:
+      - completed
+
+env:
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  AZURE_LOCATION: ${{ vars.AZURE_LOCATION || 'switzerlandnorth' }}
+  ACR_NAME: ${{ vars.ACR_NAME || 'acrimpact' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'janus' }}
+  CONTAINERAPP_ENV: ${{ vars.CONTAINERAPP_ENV || 'janus-env' }}
+  CONTAINERAPP_NAME: ${{ vars.CONTAINERAPP_NAME || 'janus' }}
+
+jobs:
+  deploy:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Resolve image tag
+        id: image
+        run: |
+          echo "tag=${{ github.event.workflow_run.head_sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Ensure Container Apps environment exists
+        run: |
+          set -euo pipefail
+          if az containerapp env show -g "${{ env.AZURE_RESOURCE_GROUP }}" -n "${{ env.CONTAINERAPP_ENV }}" >/dev/null 2>&1; then
+            echo "Container Apps environment exists."
+          else
+            az containerapp env create \
+              -g "${{ env.AZURE_RESOURCE_GROUP }}" \
+              -n "${{ env.CONTAINERAPP_ENV }}" \
+              -l "${{ env.AZURE_LOCATION }}"
+          fi
+
+      - name: Create or update Container App
+        run: |
+          set -euo pipefail
+          IMAGE="${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}"
+
+          if az containerapp show -g "${{ env.AZURE_RESOURCE_GROUP }}" -n "${{ env.CONTAINERAPP_NAME }}" >/dev/null 2>&1; then
+            az containerapp update \
+              -g "${{ env.AZURE_RESOURCE_GROUP }}" \
+              -n "${{ env.CONTAINERAPP_NAME }}" \
+              --image "$IMAGE"
+          else
+            az containerapp create \
+              -g "${{ env.AZURE_RESOURCE_GROUP }}" \
+              -n "${{ env.CONTAINERAPP_NAME }}" \
+              --environment "${{ env.CONTAINERAPP_ENV }}" \
+              --image "$IMAGE" \
+              --ingress external \
+              --target-port 8501 \
+              --registry-server "${{ env.ACR_NAME }}.azurecr.io" \
+              --registry-username "${{ secrets.ACR_USERNAME }}" \
+              --registry-password "${{ secrets.ACR_PASSWORD }}" \
+              --env-vars \
+                DBNAME="${{ secrets.DBNAME }}" \
+                HOST="${{ secrets.HOST }}" \
+                DB_USER="${{ secrets.DB_USER }}" \
+                SCHEMA_STAGING="${{ secrets.SCHEMA_STAGING }}" \
+                PASSWORD="${{ secrets.PASSWORD }}" \
+                G_TOKEN="${{ secrets.G_TOKEN }}"
+          fi
+
+      - name: Show deployment info
+        run: |
+          az containerapp show \
+            -g "${{ env.AZURE_RESOURCE_GROUP }}" \
+            -n "${{ env.CONTAINERAPP_NAME }}" \
+            --query "{fqdn:properties.configuration.ingress.fqdn, image:properties.template.containers[0].image}" \
+            -o json

@@ -1,0 +1,85 @@
+name: Run Janus (ACI)
+
+run-name: Run Janus container on Azure Container Instances
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag (e.g., latest or a sha)'
+        required: false
+        type: string
+        default: 'latest'
+      container_name:
+        description: 'ACI container name'
+        required: false
+        type: string
+        default: 'janus'
+      dns_label:
+        description: 'Optional DNS label for public FQDN (must be globally unique)'
+        required: false
+        type: string
+      location:
+        description: 'Azure region'
+        required: false
+        type: string
+        default: 'switzerlandnorth'
+
+env:
+  AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+  AZURE_LOCATION: ${{ inputs.location || 'switzerlandnorth' }}
+  ACR_NAME: ${{ vars.ACR_NAME || 'acrimpact' }}
+  IMAGE_NAME: ${{ vars.IMAGE_NAME || 'janus' }}
+  IMAGE_TAG: ${{ inputs.image_tag || 'latest' }}
+  CONTAINER_NAME: ${{ inputs.container_name || 'janus' }}
+
+jobs:
+  run-janus:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Create or update ACI container
+        run: |
+          IMAGE="${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ env.IMAGE_TAG }}"
+
+          DNS_ARG=""
+          if [ -n "${{ inputs.dns_label }}" ]; then
+            DNS_ARG="--dns-name-label ${{ inputs.dns_label }}"
+          fi
+
+          az container create \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name ${{ env.CONTAINER_NAME }} \
+            --image "$IMAGE" \
+            --os-type Linux \
+            --cpu ${{ vars.AZURE_CONTAINER_CPU || '1' }} \
+            --memory ${{ vars.AZURE_CONTAINER_MEMORY || '2' }} \
+            --restart-policy Always \
+            --location ${{ env.AZURE_LOCATION }} \
+            --ports 8501 \
+            --ip-address Public \
+            $DNS_ARG \
+            --registry-login-server ${{ env.ACR_NAME }}.azurecr.io \
+            --registry-username ${{ secrets.ACR_USERNAME }} \
+            --registry-password ${{ secrets.ACR_PASSWORD }} \
+            --environment-variables \
+              DBNAME="${{ secrets.DBNAME }}" \
+              HOST="${{ secrets.HOST }}" \
+              DB_USER="${{ secrets.DB_USER }}" \
+              SCHEMA_STAGING="${{ secrets.SCHEMA_STAGING }}" \
+            --secure-environment-variables \
+              PASSWORD="${{ secrets.PASSWORD }}" \
+              GITHUB_TOKEN="${{ secrets.GITHUB_TOKEN }}"
+
+      - name: Show container details
+        run: |
+          az container show \
+            --resource-group ${{ env.AZURE_RESOURCE_GROUP }} \
+            --name ${{ env.CONTAINER_NAME }} \
+            --query "{state:instanceView.state, ip:ipAddress.ip, fqdn:ipAddress.fqdn, image:containers[0].image}" \
+            -o json
