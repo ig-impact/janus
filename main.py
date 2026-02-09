@@ -1,6 +1,8 @@
 import os
 from datetime import datetime
 
+import psycopg
+from psycopg import sql
 import requests
 import streamlit as st
 from dotenv import load_dotenv
@@ -137,15 +139,129 @@ def format_duration(started_at: str | None, ended_at: str | None) -> str:
     return f"{seconds}s"
 
 
+def format_timestamp(value: object) -> str:
+    if value is None:
+        return "unknown"
+    if isinstance(value, datetime):
+        return value.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+    text = str(value)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return text
+    return parsed.strftime("%Y-%m-%d %H:%M:%S %Z").strip()
+
+
 def home_page() -> None:
     st.title("Janus")
     st.subheader("Overview")
     st.write("Use the sidebar to navigate to orchestration status.")
 
 
+def stats_page() -> None:
+    st.title("Janus")
+    st.subheader("Database Stats")
+    load_dotenv()
+    st.write("Database connection status")
+
+    config = {
+        "dbname": os.getenv("DBNAME", ""),
+        "host": os.getenv("HOST", ""),
+        "user": os.getenv("DB_USER", ""),
+        "password": os.getenv("PASSWORD", ""),
+    }
+
+    schema_staging = os.getenv("SCHEMA_STAGING", "")
+
+    if not all(config.values()):
+        st.warning("Database env vars are not fully configured.")
+        return
+
+    if not schema_staging:
+        st.warning("SCHEMA_STAGING is not configured.")
+        return
+
+    try:
+        with psycopg.connect(**config) as conn:
+            with conn.cursor() as cur:
+                cur.execute("select 1;")
+                cur.fetchone()
+        st.success("Database connection is alive.")
+    except psycopg.Error as exc:
+        st.error("Database connection failed.")
+        st.code(str(exc))
+        return
+
+    st.subheader("Staging metrics")
+    table_names = ["stg_klt__kobo_asset", "stg_klt__kobo_submission"]
+    try:
+        with psycopg.connect(**config) as conn:
+            with conn.cursor() as cur:
+                for table in table_names:
+                    count_query = sql.SQL("select count(*) from {}.{}").format(
+                        sql.Identifier(schema_staging),
+                        sql.Identifier(table),
+                    )
+                    cur.execute(count_query)
+                    count = cur.fetchone()[0]
+
+                    range_query = sql.SQL(
+                        "select min(loaded_at), max(loaded_at) from {}.{}"
+                    ).format(
+                        sql.Identifier(schema_staging),
+                        sql.Identifier(table),
+                    )
+                    cur.execute(range_query)
+                    earliest, latest = cur.fetchone()
+
+                    st.metric(f"{table} rows", f"{count:,}")
+                    st.caption(
+                        "Loaded at range: {} -> {}".format(
+                            format_timestamp(earliest),
+                            format_timestamp(latest),
+                        )
+                    )
+
+                    if table == "stg_klt__kobo_asset":
+                        created_query = sql.SQL(
+                            "select min(created_at), max(created_at) from {}.{}"
+                        ).format(
+                            sql.Identifier(schema_staging),
+                            sql.Identifier(table),
+                        )
+                        cur.execute(created_query)
+                        created_earliest, created_latest = cur.fetchone()
+                        st.caption(
+                            "Created at range: {} -> {}".format(
+                                format_timestamp(created_earliest),
+                                format_timestamp(created_latest),
+                            )
+                        )
+
+                    if table == "stg_klt__kobo_submission":
+                        submitted_query = sql.SQL(
+                            "select min(submitted_at), max(submitted_at) from {}.{}"
+                        ).format(
+                            sql.Identifier(schema_staging),
+                            sql.Identifier(table),
+                        )
+                        cur.execute(submitted_query)
+                        submitted_earliest, submitted_latest = cur.fetchone()
+                        st.caption(
+                            "Submitted at range: {} -> {}".format(
+                                format_timestamp(submitted_earliest),
+                                format_timestamp(submitted_latest),
+                            )
+                        )
+    except psycopg.Error as exc:
+        st.error("Failed to fetch staging row counts.")
+        st.code(str(exc))
+
+
 pages = [
     st.Page(home_page, title="Home"),
     st.Page(orchestration_page, title="Orchestration"),
+    st.Page(stats_page, title="Stats"),
 ]
 navigation = st.navigation(pages, position="sidebar")
 navigation.run()
