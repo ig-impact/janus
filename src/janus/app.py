@@ -3,12 +3,31 @@ from __future__ import annotations
 import os
 from typing import Any
 
+import geoip2.database
 import psycopg
 import streamlit as st
 from dotenv import load_dotenv
 from github import Auth, Github
 from psycopg import sql
 from psycopg.rows import dict_row
+
+db_path = "GeoLite2-City.mmdb"
+reader = geoip2.database.Reader(db_path)
+
+
+@st.cache_data(persist="disk")
+def lookup(ip):
+    try:
+        resp = reader.city(ip)
+        return {
+            "ip": ip,
+            "country": resp.country.name,
+            "city": resp.city.name,
+            "lat": resp.location.latitude,
+            "lon": resp.location.longitude,
+        }
+    except Exception as e:
+        return {"ip": ip, "error": str(e)}
 
 
 @st.cache_resource
@@ -48,7 +67,7 @@ st.header("Orchestration")
 # }
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600 * 24, persist="disk")
 def get_run_history(repo_name: str, workflow_id: int) -> list[dict[str, Any]]:
     repo = get_github_client().get_repo(repo_name)
     workflow = repo.get_workflow(workflow_id)
@@ -61,6 +80,7 @@ def get_run_history(repo_name: str, workflow_id: int) -> list[dict[str, Any]]:
             "duration": wf.timing().run_duration_ms / 1000 / 60,
         }
         for wf in workflow_runs
+        if wf.status == "completed" or wf.status == "complete"
     ]
     return run_info
 
@@ -94,7 +114,7 @@ with tab_2:
 st.header("Database")
 
 
-def check_connection() -> bool:
+def check_connection() -> bool | None:
     conn = get_db_connection()
     try:
         with conn.cursor() as cur:
@@ -113,8 +133,8 @@ with st.spinner():
         st.error(f"{e}")
 
 
-@st.cache_data()
-def fetch_row_count(table: str) -> int:
+@st.cache_data(persist="disk", ttl=3600)
+def fetch_row_count(table: str) -> int | None:
     query = sql.SQL("select count(*) from {}.{}").format(
         sql.Identifier("dummy"),
         sql.Identifier(table),
@@ -226,3 +246,66 @@ with tab_questions:
         x="event_on",
         y="count_on_event",
     )
+
+st.subheader("User Activity")
+
+
+@st.cache_data()
+def get_user_activity():
+    query = sql.SQL("""
+    select
+        date(created_at) as created_on,
+        "action",
+        count(*)
+    from
+        dummy.stg_klt__kobo_audit_log__submission_management
+    group by
+        date(created_at),
+        "action"
+    order by
+        created_on 
+    limit 10
+        ;
+    """)
+    conn = get_db_connection()
+    with conn.cursor(row_factory=dict_row) as cur:
+        try:
+            cur.execute(query)
+            row = cur.fetchall()
+            return row
+        except Exception:
+            conn.rollback()
+
+
+def get_user_location():
+    query = sql.SQL("""
+select
+	device_ip_address,
+	"action"
+from
+	dummy.stg_klt__kobo_audit_log__submission_management
+where
+	device_ip_address is not null;
+    """)
+    conn = get_db_connection()
+    with conn.cursor(row_factory=dict_row) as cur:
+        try:
+            cur.execute(query)
+            rows = cur.fetchall()
+            located_rows = []
+            for row in rows:
+                ip = row["device_ip_address"]
+                location = lookup(ip)
+                location["action"] = row["action"]
+                located_rows.append(location)
+            return located_rows
+        except Exception as e:
+            st.error(e)
+            conn.rollback()
+
+
+st.dataframe(get_user_location())
+st.map(data=get_user_location(), latitude="lat", longitude="long", width="stretch")
+
+
+reader.close()
